@@ -13,7 +13,7 @@ app.use(cors());
 app.use(express.static(path.join(__dirname, '..')));
 
 /* ── Firebase Admin init ── */
-const serviceAccount = require('./serviceAccountKey.json');
+const serviceAccount =  require('/etc/secrets/serviceAccountKey.json');;
 admin.initializeApp({
   credential: admin.credential.cert(serviceAccount)
 });
