@@ -36,10 +36,21 @@ app.post('/api/create-virtual-account', async (req, res) => {
   if (credits < 500 || amount < 500) {
     return res.status(400).json({ error: 'Minimum is 500 credits / ₦500' });
   }
-  /* enforce price integrity — credits must equal amount (1 credit = ₦1) */
-  if (credits !== amount) {
-    return res.status(400).json({ error: 'Invalid price' });
-  }
+ /* Validate allowed packages (including bonus credits) */
+const validPackages = {
+  500: 500,
+  1000: 1000,
+  2500: 2550,
+  5000: 5100,
+};
+
+if (!validPackages[amount]) {
+  return res.status(400).json({ error: 'Invalid package' });
+}
+
+if (credits !== validPackages[amount]) {
+  return res.status(400).json({ error: 'Invalid price' });
+}
 
   const txRef     = `cgbaby_${uid.slice(0,8)}_${Date.now()}`;
   const expiresAt = Date.now() + 10 * 60 * 1000; // 10 minutes
