@@ -3,6 +3,7 @@ const cors       = require('cors');
 const axios      = require('axios');
 const admin      = require('firebase-admin');
 const path       = require('path');
+const nodemailer = require('nodemailer');
 require('dotenv').config();
 
 const app = express();
@@ -18,6 +19,81 @@ admin.initializeApp({
   credential: admin.credential.cert(serviceAccount)
 });
 const db = admin.firestore();
+
+/* ══════════════════════════════════════════
+   EMAIL NOTIFICATIONS (direct to your inbox)
+   Uses Gmail SMTP via Nodemailer — free, no
+   third-party form service involved.
+
+   Render env vars needed:
+     EMAIL_USER          the Gmail address that SENDS the email
+     EMAIL_APP_PASSWORD  a Gmail "App Password" (NOT your normal password —
+                          generate one at myaccount.google.com/apppasswords,
+                          requires 2-Step Verification turned on first)
+     NOTIFY_EMAIL         the inbox that RECEIVES bookings (defaults to
+                          EMAIL_USER if not set — can be the same address)
+══════════════════════════════════════════ */
+const EMAIL_USER   = process.env.EMAIL_USER;
+const EMAIL_PASS   = process.env.EMAIL_APP_PASSWORD;
+const NOTIFY_EMAIL = process.env.NOTIFY_EMAIL || EMAIL_USER;
+
+const mailTransporter = (EMAIL_USER && EMAIL_PASS)
+  ? nodemailer.createTransport({
+      service: 'gmail',
+      auth: { user: EMAIL_USER, pass: EMAIL_PASS },
+    })
+  : null;
+
+function fmtDateForEmail(v) {
+  if (!v) return '—';
+  try { return new Date(v).toLocaleDateString('en-NG', { weekday: 'short', day: '2-digit', month: 'short', year: 'numeric' }); }
+  catch { return String(v); }
+}
+
+async function sendBookingEmail(booking) {
+  if (!mailTransporter) {
+    console.warn('Email not sent — EMAIL_USER / EMAIL_APP_PASSWORD not set on Render.');
+    return;
+  }
+
+  const isQuote = booking.status === 'quote_requested';
+  const subject = isQuote
+    ? `💍 New Wedding Quote Request — ${booking.fullName}`
+    : `📸 New Booking — ${booking.fullName} (${booking.packageLabel})`;
+
+  const html = `
+    <div style="font-family:sans-serif;max-width:600px;margin:0 auto;padding:20px;background:#0a0a0a;color:#fff;border-radius:16px;border:1px solid #ff8c00">
+      <h2 style="color:#ff8c00;margin-bottom:4px">${isQuote ? 'New Wedding Quote Request' : 'New Booking Received'}</h2>
+      <p style="color:#888;font-size:13px;margin-top:0">Ref: ${booking.txRef}</p>
+      <table style="width:100%;border-collapse:collapse;font-size:14px">
+        <tr><td style="padding:6px 0;color:#888">Full Name</td><td style="padding:6px 0;font-weight:bold">${booking.fullName}</td></tr>
+        <tr><td style="padding:6px 0;color:#888">Contact</td><td style="padding:6px 0;font-weight:bold">${booking.contact}</td></tr>
+        <tr><td style="padding:6px 0;color:#888">Session For</td><td style="padding:6px 0;font-weight:bold;text-transform:capitalize">${booking.sessionFor}</td></tr>
+        <tr><td style="padding:6px 0;color:#888">Service Type</td><td style="padding:6px 0;font-weight:bold">${booking.serviceType}</td></tr>
+        <tr><td style="padding:6px 0;color:#888">Package</td><td style="padding:6px 0;font-weight:bold;color:#ffd700">${booking.packageLabel}</td></tr>
+        <tr><td style="padding:6px 0;color:#888">Session Date</td><td style="padding:6px 0;font-weight:bold">${fmtDateForEmail(booking.bookingDate)}</td></tr>
+        <tr><td style="padding:6px 0;color:#888">Delivery Date</td><td style="padding:6px 0;font-weight:bold">${fmtDateForEmail(booking.deliveryDate)}</td></tr>
+        <tr><td style="padding:6px 0;color:#888">Express Delivery</td><td style="padding:6px 0;font-weight:bold">${booking.express ? 'Yes (+₦5,000)' : 'No'}</td></tr>
+        <tr><td style="padding:6px 0;color:#888">${isQuote ? 'Pricing' : 'Amount'}</td><td style="padding:6px 0;font-weight:bold;color:#ffd700">${isQuote ? 'Custom quote needed' : `₦${(booking.amount || 0).toLocaleString()}`}</td></tr>
+        <tr><td style="padding:6px 0;color:#888;vertical-align:top">Notes</td><td style="padding:6px 0">${booking.notes ? booking.notes : '—'}</td></tr>
+      </table>
+      <p style="color:#666;font-size:11px;margin-top:20px">${isQuote ? 'No payment has been made — reach out to discuss pricing.' : 'This booking is awaiting bank transfer confirmation. Check the admin dashboard.'}</p>
+    </div>
+  `;
+
+  try {
+    await mailTransporter.sendMail({
+      from: `"CG Pixels Bookings" <${EMAIL_USER}>`,
+      to: NOTIFY_EMAIL,
+      replyTo: booking.email || undefined,
+      subject,
+      html,
+    });
+    console.log(`✅ Booking notification emailed for ${booking.txRef}`);
+  } catch (err) {
+    console.error('Email send failed:', err.message);
+  }
+}
 
 const FLW_SECRET_KEY   = process.env.FLW_SECRET_KEY;
 const FLW_WEBHOOK_HASH = process.env.FLW_WEBHOOK_HASH;
@@ -231,6 +307,13 @@ app.post('/api/create-booking-account', async (req, res) => {
       expiresAt:     new Date(expiresAt),
     });
 
+    /* fire-and-forget — a slow/failed email should never block the booking */
+    sendBookingEmail({
+      txRef, fullName, contact, email, sessionFor, serviceType,
+      package: pkg, packageLabel: pkgDef.label, bookingDate, deliveryDate,
+      express: !!express, amount, notes: notes || '', status: 'pending',
+    });
+
     return res.json({
       success:       true,
       txRef,
@@ -291,6 +374,12 @@ app.post('/api/create-quote-request', async (req, res) => {
       notes:        notes || '',
       status:       'quote_requested',
       createdAt:    admin.firestore.FieldValue.serverTimestamp(),
+    });
+
+    sendBookingEmail({
+      txRef: ref, fullName, contact, sessionFor, serviceType,
+      package: pkg, packageLabel: 'Full Wedding Package', bookingDate, deliveryDate,
+      express: false, amount: 0, notes: notes || '', status: 'quote_requested',
     });
 
     return res.json({ success: true, ref });
