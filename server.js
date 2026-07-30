@@ -123,10 +123,29 @@ if (credits !== validPackages[amount]) {
    submits the booking form
 ══════════════════════════════════════════ */
 const BOOKING_PACKAGES = {
-  regular: 3000,
-  bronze:  25000,
-  silver:  40000,
-  gold:    70000,
+  'Studio Session': {
+    regular: { label: 'Regular',             price: 3000 },
+    bronze:  { label: 'Bronze',              price: 25000 },
+    silver:  { label: 'Silver',              price: 40000 },
+    gold:    { label: 'Gold',                price: 70000 },
+  },
+  'Event': {
+    regular: { label: 'Regular',             price: 3000 },
+    bronze:  { label: 'Bronze',              price: 25000 },
+    silver:  { label: 'Silver',              price: 40000 },
+    gold:    { label: 'Gold',                price: 70000 },
+  },
+  'Home Service': {
+    bronze: { label: 'Bronze', price: 120000, depositPercent: 75 },
+    silver: { label: 'Silver', price: 200000, depositPercent: 75 },
+    gold:   { label: 'Gold',   price: 350000, depositPercent: 75 },
+  },
+  'Wedding': {
+    pre_wedding: { label: 'Pre-Wedding Session', price: 50000 },
+    /* wedding_package is intentionally absent here — it's quote-only and
+       must never go through /api/create-booking-account. It's handled by
+       /api/create-quote-request instead. */
+  },
 };
 const EXPRESS_FEE = 5000;
 
@@ -147,12 +166,15 @@ app.post('/api/create-booking-account', async (req, res) => {
     return res.status(400).json({ error: 'Missing required fields' });
   }
 
-  const basePrice = BOOKING_PACKAGES[pkg];
-  if (!basePrice) {
-    return res.status(400).json({ error: 'Invalid package' });
+  const pkgDef = BOOKING_PACKAGES[serviceType]?.[pkg];
+  if (!pkgDef) {
+    return res.status(400).json({ error: 'Invalid package for this service type' });
   }
 
   /* amount is always computed server-side — never trust a client-sent amount */
+  const basePrice = pkgDef.depositPercent
+    ? Math.round(pkgDef.price * pkgDef.depositPercent / 100)
+    : pkgDef.price;
   const amount = basePrice + (express ? EXPRESS_FEE : 0);
   const email  = deriveEmail(contact);
 
@@ -191,8 +213,10 @@ app.post('/api/create-booking-account', async (req, res) => {
       email,
       sessionFor,
       serviceType,
-      package:       pkg,
-      packageLabel:  pkg.charAt(0).toUpperCase() + pkg.slice(1),
+      package:        pkg,
+      packageLabel:   pkgDef.label,
+      packagePrice:   pkgDef.price,
+      depositPercent: pkgDef.depositPercent || 100,
       bookingDate,
       deliveryDate,
       express:       !!express,
@@ -223,6 +247,56 @@ app.post('/api/create-booking-account', async (req, res) => {
       error:  'Could not create virtual account. Please try again.',
       detail: err.response?.data?.message || err.message,
     });
+  }
+});
+
+/* ══════════════════════════════════════════
+   POST /api/create-quote-request
+   For pricing that can't be charged online yet
+   (currently: the full Wedding Package, which
+   varies by location). No Flutterwave call —
+   just logs the inquiry for the team to follow
+   up on manually.
+══════════════════════════════════════════ */
+app.post('/api/create-quote-request', async (req, res) => {
+  const {
+    fullName, contact, sessionFor, serviceType,
+    package: pkg, bookingDate, deliveryDate, notes,
+  } = req.body;
+
+  if (!fullName || !contact || !sessionFor || !serviceType || !pkg || !bookingDate) {
+    return res.status(400).json({ error: 'Missing required fields' });
+  }
+
+  /* only the full Wedding Package is allowed through this quote-only route */
+  if (serviceType !== 'Wedding' || pkg !== 'wedding_package') {
+    return res.status(400).json({ error: 'This service does not use quote requests' });
+  }
+
+  const ref = `cgquote_${Date.now()}_${Math.random().toString(36).slice(2, 8)}`;
+
+  try {
+    await db.collection('bookings').doc(ref).set({
+      txRef:        ref,
+      fullName,
+      contact,
+      sessionFor,
+      serviceType,
+      package:      pkg,
+      packageLabel: 'Full Wedding Package',
+      bookingDate,
+      deliveryDate,
+      express:      false,
+      amount:       0,
+      notes:        notes || '',
+      status:       'quote_requested',
+      createdAt:    admin.firestore.FieldValue.serverTimestamp(),
+    });
+
+    return res.json({ success: true, ref });
+  } catch (err) {
+    console.error('create-quote-request error:', err.message);
+    return res.status(500).json({ error: 'Could not send your request. Please try again.' });
   }
 });
 
