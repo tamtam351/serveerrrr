@@ -3,7 +3,6 @@ const cors       = require('cors');
 const axios      = require('axios');
 const admin      = require('firebase-admin');
 const path       = require('path');
-const nodemailer = require('nodemailer');
 require('dotenv').config();
 
 const app = express();
@@ -22,27 +21,34 @@ const db = admin.firestore();
 
 /* ══════════════════════════════════════════
    EMAIL NOTIFICATIONS (direct to your inbox)
-   Uses Gmail SMTP via Nodemailer — free, no
-   third-party form service involved.
+   Uses Resend's HTTP API — not SMTP.
 
-   Render env vars needed:
-     EMAIL_USER          the Gmail address that SENDS the email
-     EMAIL_APP_PASSWORD  a Gmail "App Password" (NOT your normal password —
-                          generate one at myaccount.google.com/apppasswords,
-                          requires 2-Step Verification turned on first)
-     NOTIFY_EMAIL         the inbox that RECEIVES bookings (defaults to
-                          EMAIL_USER if not set — can be the same address)
+   IMPORTANT: Render blocks outbound SMTP ports
+   (the ones Gmail/Nodemailer need) on its web
+   services, which is why a Gmail-SMTP approach
+   will always fail with "Connection timeout"
+   here. Resend sends over plain HTTPS (port 443,
+   same as any normal API call), so it isn't
+   affected by that block at all.
+
+   Setup (free):
+     1. Sign up at https://resend.com using
+        cgstudios.ng@gmail.com (same address you
+        want notifications sent TO).
+     2. Dashboard → API Keys → create one.
+     3. Add on Render:
+          RESEND_API_KEY   the key from step 2
+          NOTIFY_EMAIL     cgstudios.ng@gmail.com
+     Without a verified custom domain, Resend's
+     free/sandbox mode can only deliver to the
+     email address you signed up with — which is
+     exactly NOTIFY_EMAIL here, so this works with
+     zero extra setup. (Verifying your own domain
+     later lets you send to any address and use a
+     "from" address like bookings@cgstudios.ng.)
 ══════════════════════════════════════════ */
-const EMAIL_USER   = process.env.EMAIL_USER;
-const EMAIL_PASS   = process.env.EMAIL_APP_PASSWORD;
-const NOTIFY_EMAIL = process.env.NOTIFY_EMAIL || EMAIL_USER;
-
-const mailTransporter = (EMAIL_USER && EMAIL_PASS)
-  ? nodemailer.createTransport({
-      service: 'gmail',
-      auth: { user: EMAIL_USER, pass: EMAIL_PASS },
-    })
-  : null;
+const RESEND_API_KEY = process.env.RESEND_API_KEY;
+const NOTIFY_EMAIL   = process.env.NOTIFY_EMAIL;
 
 function fmtDateForEmail(v) {
   if (!v) return '—';
@@ -51,8 +57,8 @@ function fmtDateForEmail(v) {
 }
 
 async function sendBookingEmail(booking) {
-  if (!mailTransporter) {
-    console.warn('Email not sent — EMAIL_USER / EMAIL_APP_PASSWORD not set on Render.');
+  if (!RESEND_API_KEY || !NOTIFY_EMAIL) {
+    console.warn('Email not sent — RESEND_API_KEY / NOTIFY_EMAIL not set on Render.');
     return;
   }
 
@@ -82,16 +88,20 @@ async function sendBookingEmail(booking) {
   `;
 
   try {
-    await mailTransporter.sendMail({
-      from: `"CG Pixels Bookings" <${EMAIL_USER}>`,
-      to: NOTIFY_EMAIL,
-      replyTo: booking.email || undefined,
-      subject,
-      html,
-    });
+    await axios.post(
+      'https://api.resend.com/emails',
+      {
+        from:     'CG Studios Bookings <onboarding@resend.dev>',
+        to:       [NOTIFY_EMAIL],
+        reply_to: booking.email || undefined,
+        subject,
+        html,
+      },
+      { headers: { Authorization: `Bearer ${RESEND_API_KEY}`, 'Content-Type': 'application/json' } }
+    );
     console.log(`✅ Booking notification emailed for ${booking.txRef}`);
   } catch (err) {
-    console.error('Email send failed:', err.message);
+    console.error('Email send failed:', err.response?.data || err.message);
   }
 }
 
